@@ -1,0 +1,60 @@
+#!/bin/bash
+
+_getContainers()
+{
+    # get all correctly named containers and cut the prefix
+    podman container list --all --format "{{.Names}}" | grep "devenv_container_" | while read line ; do
+        name="${line##devenv_container_}"
+        echo $name
+    done
+}
+
+_devcont() 
+{
+    local cur prev opts
+    COMPREPLY=()
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev="${COMP_WORDS[COMP_CWORD-1]}"
+    opts1="start create destroy rebuild update_nvidia --help"
+    # the apps to offer on start autocomplete
+    apps="bash codium"
+
+    if [[ ${#COMP_WORDS[@]} == 1 ]] && [[ ${COMP_WORDS[0]} == "devcont" ]] ; then
+        # for self autocomplete, to auto add a space after the command on tab press
+        COMPREPLY=( $(compgen -W "devcont" -- ${cur}) )
+    elif [[ ${COMP_WORDS[1]} == "create" ]] ; then
+        if [[ ${#COMP_WORDS[@]} == 3 ]] ; then
+            # at this place, the new name of the containers must be entered
+            # in theory, there is no autocomplete for that, but we allow to take folder names as name
+            _filedir
+        elif [[ ${prev} == "--volume" ]] ; then
+            # after volume, only a path is allowed
+            _filedir
+        elif [[ ${prev} == "--publish" ]] ; then
+            # after publish, a port mapping follows (e.g. 8188:8188), no completion
+            COMPREPLY=()
+        else
+            COMPREPLY=( $(compgen -W "--volume --publish" -- ${cur}) )
+        fi
+    elif [[ ${COMP_WORDS[1]} == "start" ]] ; then
+        if [[ ${#COMP_WORDS[@]} == 3 ]] ; then
+            COMPREPLY=( $(compgen -W "$(_getContainers)" -- ${cur}) )
+        elif [[ ${#COMP_WORDS[@]} == 4 ]] ; then
+            COMPREPLY=( $(compgen -W "${apps}" -- ${cur}) )
+        else
+            COMPREPLY=()
+        fi
+    elif [[ ${COMP_WORDS[1]} == "destroy" ]] ; then
+        if [[ ${#COMP_WORDS[@]} == 3 ]] ; then
+            COMPREPLY=( $(compgen -W "$(_getContainers)" -- ${cur}) )
+        else
+            COMPREPLY=()
+        fi
+    elif [[ ${#COMP_WORDS[@]} == 2 ]] ; then
+        COMPREPLY=( $(compgen -W "${opts1}" -- ${cur}) )
+    fi
+
+    return 0
+}
+# `devcont` <tab> <tab> would show autocomplete above wordlist 
+complete -F _devcont devcont

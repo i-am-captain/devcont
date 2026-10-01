@@ -1,0 +1,13 @@
+{
+    "telemetry.feedback.enabled": false,
+    "git.confirmSync": false,
+    "extensions.autoUpdate": "off",
+    "extensions.autoCheckUpdates": true,
+    "files.exclude": {
+        "**/.DS_Store": false,
+        "**/.git": false,
+        "**/.hg": false,
+        "**/.svn": false,
+        "**/Thumbs.db": false
+    }
+}

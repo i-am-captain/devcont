@@ -1,0 +1,323 @@
+#!/bin/bash
+
+# Alternative to a compose file. Podman compose is not flexible enough,
+# to create an arbitrary amount of "dev" containers based on given variables.
+# It is more suited for one static configuration, with a fixed set of mounted
+# volumes.
+# But i want to be more dynamic and create separate containers for separate dev work.
+
+main()
+{
+    # Directory of the actual script, resolving symlinks (install.sh symlinks
+    # this file into ~/.local/bin, so BASH_SOURCE[0] alone would point there).
+    SCRIPT_DIR=$( cd -- "$( dirname -- "$(realpath "${BASH_SOURCE[0]}")" )" &> /dev/null && pwd )
+
+    MODE=""
+    NAME=""
+
+    POSITIONAL_ARGS=()
+    VOLUMES=()
+    PUBLISH=()
+
+    # by default execute interactive terminal bash
+    APP="bash"
+
+    # while number of params greater than 0
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            "start")
+                MODE="start"
+                NAME="$2"
+                APP="${3:-"$APP"}"
+                shift # past argument
+                shift # past value
+                ;;
+            "create")
+                MODE="create"
+                NAME="$2"
+                shift # past argument
+                shift # past value
+                ;;
+            "destroy")
+                MODE="destroy"
+                NAME="$2"
+                shift # past argument
+                shift # past value
+                ;;
+            "rebuild")
+                MODE="rebuild"
+                shift # past argument
+                ;;
+            "update_nvidia")
+                sudo nvidia-ctk cdi generate --output=/var/run/cdi/nvidia.yaml
+                exit 0
+                ;;
+            "--volume")
+                volume=$(realpath "$2")
+                VOLUMES+=("$volume")
+                shift # past argument
+                shift # past value
+                ;;
+            "--publish")
+                PUBLISH+=("$2")
+                shift # past argument
+                shift # past value
+                ;;
+            "--help")
+                echo "start [name]      Run an existing container and start codium in it."
+                echo "create [name]     Create a new container with an arbitrary name. Use with --volume to mount local directories into it."
+                echo "                  e.g. devcont create comfy --volume ~/projects --publish 8188:8188, then open http://localhost:8188 for ComfyUI."
+                echo "destroy [name]    Destroy an existing container. Stops it, deletes it and deletes its network."
+                echo "rebuild           Rebuild the container image from the Containerfile in the repository, from where devcont was installed."
+                echo "update_nvidia     Run 'nvidia-ctk cdi generate' to recreate the crk config. Has to be done after nvidia driver updates."
+                echo "--volume [path]   Use with create, mounts the given directory as volume into the container."
+                echo "--publish [host:]container  Use with create, publishes a container port on the host (repeatable)."
+                echo "--help            Show this help message."
+                exit 0
+                ;;
+            -*|--*)
+                echo "Unknown option $1"
+                echo "create [name], destroy [name], rebuild, --volume [path]"
+                exit 1
+                ;;
+            *)
+                POSITIONAL_ARGS+=("$1") # save positional arg
+                shift # past argument
+                ;;
+        esac
+    done
+
+
+    container_name="devenv_container_${NAME}"
+    network_name="devenv_network_${NAME}"
+
+    case $MODE in
+        "create")
+            create_container
+            ;;
+        "start")
+            start_devenv
+            ;;
+        "destroy")
+            destroy_container
+            ;;
+        "rebuild")
+            rebuild_image
+            ;;
+        *)
+            echo "Unknown mode $MODE. Exiting."
+            exit 1
+            ;;
+    esac
+}
+
+rebuild_image()
+{
+    SCRIPT_LOCATION="${SCRIPT_DIR}"
+    echo "Running podman build."
+    cd "${SCRIPT_LOCATION}/.."
+
+    echo "Enter password for the user in the container."
+    echo "The password is stored in the image and could be extracted."
+    echo "Do not reuse an already existing password, e.g. from the host user."
+    echo "If you do, make extra sure to not share or upload the image."
+    read -s -p "Container user password:" secret_variable
+    touch /tmp/devenv_userpw.txt
+    # do not let other users intercept, won't happen, but better be save
+    # the in container password is not really critical, since the container is rootless.
+    chmod og-rwx /tmp/devenv_userpw.txt
+    echo "${secret_variable}" > ${HOME}/devenv_userpw.txt
+
+    # local indexed array
+    command=(podman build)
+
+    command+=(-t devenv)
+    command+=(-f ./Containerfile)
+    # use host uid and gid, to make mapped volumes owned by both container and host user
+    command+=(--build-arg UID="$(id -u)")
+    command+=(--build-arg GID="$(id -g)")
+    # Force cache invalidation with timestamp, so that every build actually uses the set password.
+    command+=(--build-arg CACHE_BUST=$(date +%s))
+    command+=(--secret id=user_password,src=${HOME}/devenv_userpw.txt)
+    command+=(--build-context blender_dir=/run/media/user1/data2/resources/blender/)
+    # context
+    command+=(./)
+
+    printf "Command:\n"
+    # * expands array into single string, @ expands into separate elements
+    printf "${command[*]}\n\n"
+
+    # expand the array and run the whole command
+    "${command[@]}"
+
+    # don't leave password file hanging
+    rm ${HOME}/devenv_userpw.txt
+}
+
+
+start_devenv()
+{
+    if podman ps -q --filter "name=^${container_name}$" | grep -q .; then
+        echo "Container ${container_name} is already running."
+    else
+        echo "Container ${container_name} is NOT running."
+        if podman container list --all -q --filter "name=^${container_name}$" | grep -q .; then
+            echo "Container ${container_name} does exist. Restarting it."
+            podman start ${container_name}
+        else
+            echo "Container ${container_name} does NOT exist. Exiting."
+            echo "You must create the container first."
+            exit 1
+        fi
+    fi
+
+    # execute whatever we want to execute inside a login shell, so that all env vars are availabe.
+    IT=""
+    if [[ "${APP}" == "bash" ]]
+    then
+        IT="-it"
+    fi
+    podman exec ${IT} ${container_name} bash -l -c "${APP}"
+}
+
+create_container()
+{
+    # create network first
+    if podman network list -q --filter "name=^${network_name}$" | grep -q .; then
+        printf "Network ${network_name} already exists. Reusing it.\n"
+    else
+        printf "Creating network ${network_name}.\n"
+        podman network create ${network_name}
+    fi
+
+    # create and start container, if it does not exist yet
+    if podman ps -q --filter "name=^${container_name}$" | grep -q .; then
+        echo "Container ${container_name} is already running."
+        exit 0
+    else
+        echo "Container ${container_name} is NOT running."
+        if podman container list --all -q --filter "name=^${container_name}$" | grep -q .; then
+            echo "Container ${container_name} does exist. Restarting it."
+            podman start ${container_name}
+            exit 0
+        else
+            echo "Container ${container_name} does NOT exist. Will start a new one."
+        fi
+    fi
+
+    command=(podman run)
+
+    command+=("-d")
+
+    command+=("--name=${container_name}")
+    command+=("--hostname=${container_name}")
+
+    command+=("--init")
+    # this is easier than manual user name space mapping and works pretty well
+    # it makes sure that all files created in the container are owned by the host user
+    command+=("--userns=keep-id")
+    # give container a generic name, it does not matter.
+    command+=("--user=cuser")
+
+    command+=("--device=nvidia.com/gpu=all")
+
+    # this is not needed, when nvidia ctk is used
+    # command+=("--device=/dev/dri:/dev/dri")
+
+    # Deliberately running in the runtime domain. Tried the confined default
+    # (container_t), but Blender/GUI hit connectto denials on the live Wayland
+    # socket plus more AVCs, and debugging that per-denial was not worth it.
+    command+=("--security-opt=label=type:container_runtime_t")
+
+    command+=("--env=XDG_RUNTIME_DIR=/tmp")
+    command+=("--env=WAYLAND_DISPLAY=$WAYLAND_DISPLAY")
+    command+=("--env=QT_QPA_PLATFORM=wayland")
+    command+=("--env=XDG_SESSION_TYPE=wayland")
+    command+=("--env=GDK_BACKEND=wayland")
+    command+=("--env=NVIDIA_VISIBLE_DEVICES=all")
+    command+=("--env=NVIDIA_DRIVER_CAPABILITIES=all")
+
+    command+=("--network=${network_name}")
+
+    # NOTE: no :z here on purpose. The Wayland socket is a live socket object
+    # labeled at bind() time by the compositor; relabeling the path does not
+    # change the socket object label, so :z cannot fix container_t connectto
+    # denials. See devcont-wayland policy module / container_runtime_t fallback.
+    command+=("--volume=$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY:/tmp/$WAYLAND_DISPLAY")
+
+    # Instead of copying e.g. bash_prompt and other custom bash scripts into the image, mount them read only.
+    # This is optional, but makes sure that every container has the same user experience as the host.
+    # If containers should have another bash style, remove this line and add configs manually.
+    # :z is required: without relabeling, the files keep user_home_t and
+    # container_t cannot read them (only the overprivileged container_runtime_t could).
+    if [[ -d /home/${USER}/.bashrc.d ]]
+    then
+        command+=("--volume=/home/${USER}/.bashrc.d:/home/cuser/.bashrc.d:ro,z")
+    fi
+
+    # Mount git config to get user name, email and consistent git behavior in every container.
+    if [[ -f /home/${USER}/.gitconfig ]]
+    then
+        command+=("--volume=/home/${USER}/.gitconfig:/home/cuser/.gitconfig:ro,z")
+    fi
+
+    # Mount opencode commands readonly, so workflow commands update without image rebuild.
+    # Host path is resolved relative to this script (SCRIPT_DIR follows the install symlink via realpath).
+    if [[ -d "${SCRIPT_DIR}/../config/opencode/commands" ]]
+    then
+        command+=("--volume=${SCRIPT_DIR}/../config/opencode/commands:/home/cuser/.config/opencode/commands:ro,z")
+    fi
+
+    # TODO: check both if still needed
+    # workaround for https://github.com/NVIDIA/nvidia-container-toolkit/issues/767
+    # command+=("--volume=/usr/share/vulkan/icd.d/nvidia_icd.x86_64.json:/usr/share/vulkan/icd.d/nvidia_icd.json:ro")
+    # https://github.com/89luca89/distrobox/issues/1687
+    # command+=("--volume=/run/host/usr/share/vulkan/icd.d/nvidia_icd.x86_64.json:/run/host/usr/share/vulkan/icd.d/nvidia_icd.x86_64.json:ro")
+
+    for volume in "${VOLUMES[@]}"; do
+        echo "Mounting volume: ${volume}"
+        command+=("--volume=${volume}:${volume}:z")
+    done
+
+    for port in "${PUBLISH[@]}"; do
+        echo "Publishing port: ${port}"
+        command+=("--publish=${port}")
+    done
+
+    command+=("localhost/devenv:latest")
+    # let the container main process wait and sleep forever
+    command+=(bash -c "unset sleep; trap 'echo Terminated; kill \$sleep; exit' TERM; sleep infinity & sleep=\$!; wait")
+
+
+    printf "Command:\n"
+    # * expands array into single string, @ expands into separate elements
+    printf "${command[*]}\n\n"
+
+    "${command[@]}"
+}
+
+destroy_container()
+{
+    if podman ps -q --filter "name=^${container_name}$" | grep -q .; then
+        echo "Container ${container_name} is running. Stopping it."
+        podman container stop ${container_name}
+    else
+        echo "Container ${container_name} is not running."
+    fi
+
+    if podman container list --all -q --filter "name=^${container_name}$" | grep -q .; then
+        echo "Container ${container_name} does exist. Deleting it."
+        podman container rm ${container_name}
+    else
+        echo "Container ${container_name} does not exist."
+    fi
+
+    if podman network list -q --filter "name=^${network_name}$" | grep -q .; then
+        printf "Network ${network_name} exists. Deleing it.\n"
+        podman network rm ${network_name}
+    else
+        printf "Network ${network_name}  does not exist.\n"
+    fi
+}
+
+main "$@"

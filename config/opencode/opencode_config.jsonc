@@ -1,0 +1,51 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  // very important:
+  "share": "disabled",
+  "mcp": {
+    "servers": {
+      "blender-mcp": {
+        "disabled": false,
+        "type": "local",
+        "command": [
+          "uvx",
+          "blender-mcp"
+        ],
+        "environment": {
+          "BLENDER_HOST": "localhost",
+          "BLENDER_PORT": "9876"
+        }
+      }
+    }
+  },
+  "providers": {
+    "llamacpp": {
+      "package": "@opencode/ai/providers/openai-compatible",
+      "name": "llamacpp (local)",
+      "settings": {
+        "baseURL": "http://host.containers.internal:11434/v1"
+      },
+      "models": {
+        "Qwen": {
+          "name": "Qwen",
+          "modelID": "Qwen",
+          "limit": {
+            "context": 131072,
+            "output": 16000
+          },
+          // just to compare with cloud pricing
+          // tracks local usage as if it cost API pricing
+          "cost": {
+            "input": 0.15,
+            "output": 0.47,
+            "cache": {
+              "read": 0.016,
+              "write": 0.2
+            }
+          }
+        }
+      }
+    }
+  },
+  "model": "llamacpp/Qwen"
+}
