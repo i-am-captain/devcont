@@ -1,0 +1,28 @@
+# The image used should be the same as the host os
+# Otherwise you can get problems with nvidia ctk (container toolkit), since it reuses the drivers
+FROM docker.io/library/fedora:44
+
+# more colors in bash
+ENV TERM xterm-256color
+
+ARG UID=1000
+ARG GID=1000
+
+USER root
+WORKDIR /opt/root_setup
+
+# copy scripts one by one, for better layer caching on frequent changes.
+COPY ./scripts/root /opt/root_setup
+RUN ./install_software.sh
+RUN ./install_cuda_toolkit_dnf.sh
+
+COPY ./scripts/root/create_user.sh ./create_user.sh
+RUN ./create_user.sh && rm ./create_user.sh
+
+USER cuser
+WORKDIR /home/cuser
+
+COPY --chown=cuser:cuser ./scripts/user user_setup
+RUN ./user_setup/install_comfyui.sh
+
+USER cuser
